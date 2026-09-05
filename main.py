@@ -1,3 +1,4 @@
+
 import os
 import sqlite3
 import json
@@ -90,12 +91,12 @@ def save_player(p):
     conn.commit()
     conn.close()
 
-# 3. Gemini REST API 직접 호출 엔진
+# 3. Gemini REST API 직접 호출 엔진 (404 방지 다중 모델 Fallback 지원)
 SYSTEM_PROMPT = """당신은 삼국지 정통 TRPG GM입니다.
 규칙:
-1. 사견을 배제하고 플레이어의 행동에 따른 역사적/상황적 전개 결과를 200~400자 내외로 박진감 있게 서술하세요.
+1. 플레이어의 행동에 따른 역사적/상황적 전개 결과를 200~400자 내외로 박진감 있게 서술하세요.
 2. 1d50 주사위 판정: 1~3(대성공), 4~25(성공), 26~46(실패), 47~50(대실패).
-3. 반드시 아래의 순수 JSON 포맷 하나만 반환하세요 (마크다운 백틱 기호 없이 순수 JSON만 출력):
+3. 반드시 아래 순수 JSON 포맷 하나만 반환하세요 (마크다운 백틱 기호 없이 순수 JSON만 출력):
 {
   "dice_roll": 15,
   "thresholds": "대성공(1~3)/성공(4~25)/실패(26~46)/대실패(47~50)",
@@ -143,32 +144,43 @@ async def query_gemini_gm(player, action_text):
         f"[플레이어 행동]\n{action_text}"
     )
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    full_text_input = f"{SYSTEM_PROMPT}\n\n{prompt}"
     payload = {
-        "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
-        "contents": [{"parts": [{"text": prompt}]}],
+        "contents": [{"parts": [{"text": full_text_input}]}],
         "generationConfig": {"temperature": 0.7}
     }
 
+    candidate_models = [
+        "gemini-2.0-flash",
+        "gemini-1.5-flash-latest",
+        "gemini-1.5-flash",
+        "gemini-pro"
+    ]
+
     try:
         async with ClientSession() as session:
-            async with session.post(url, json=payload, timeout=20) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    raw = data['candidates'][0]['content']['parts'][0]['text'].strip()
-                    match = re.search(r"\{.*\}", raw, re.DOTALL)
-                    if match:
-                        return json.loads(match.group(0))
-                    default_res["narrative"] = raw[:800]
-                    return default_res
-                else:
-                    err_txt = await resp.text()
-                    print(f"[Gemini HTTP Error {resp.status}]: {err_txt}")
-                    default_res["narrative"] = f"행동을 수행했습니다. (API 코드: {resp.status})"
-                    return default_res
+            for model_name in candidate_models:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+                async with session.post(url, json=payload, timeout=25) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        raw = data['candidates'][0]['content']['parts'][0]['text'].strip()
+                        match = re.search(r"\{.*\}", raw, re.DOTALL)
+                        if match:
+                            return json.loads(match.group(0))
+                        default_res["narrative"] = raw[:800]
+                        return default_res
+                    elif resp.status == 404:
+                        continue
+                    else:
+                        err_txt = await resp.text()
+                        print(f"[{model_name} HTTP {resp.status}]: {err_txt}")
+            
+            default_res["narrative"] = "주변을 신중하게 살폈으나 아직 큰 변화는 일어나지 않았습니다."
+            return default_res
     except Exception as e:
         print(f"[Gemini Exception]: {e}")
-        default_res["narrative"] = f"행동을 완수했습니다. (오류: {e})"
+        default_res["narrative"] = f"행동을 실행했습니다."
         return default_res
 
 # 4. 상태창 Embed
