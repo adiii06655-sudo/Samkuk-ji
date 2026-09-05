@@ -4,29 +4,20 @@ import json
 import random
 import re
 import asyncio
-from aiohttp import web
+from aiohttp import web, ClientSession
 import discord
 from discord.ext import commands
 from discord.ui import View, Button
-from google import genai
-from google.genai import types
 
-# 1. 환경 변수 및 설정
+# 1. 환경 변수 및 디스코드 설정
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-
-client = None
-if GEMINI_API_KEY:
-    try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
-    except Exception as e:
-        print(f"GenAI Client Init Error: {e}")
 
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="", intents=intents)
 
-# 2. SQLite 데이터베이스
+# 2. SQLite DB 설정
 def init_db():
     conn = sqlite3.connect("game.db")
     c = conn.cursor()
@@ -99,12 +90,12 @@ def save_player(p):
     conn.commit()
     conn.close()
 
-# 3. Gemini GM AI 엔진
+# 3. Gemini REST API 직접 호출 엔진 (외부 SDK 무의존)
 SYSTEM_PROMPT = """당신은 삼국지 정통 TRPG GM입니다.
 규칙:
-1. 사견을 배제하고 플레이어의 행동에 따른 전개 결과를 200~400자 내외로 흥미진진하게 서술하세요.
+1. 사견을 배제하고 플레이어의 행동에 따른 역사적/상황적 전개 결과를 200~400자 내외로 박진감 있게 서술하세요.
 2. 1d50 주사위 판정: 1~3(대성공), 4~25(성공), 26~46(실패), 47~50(대실패).
-3. 반드시 아래의 순수 JSON 포맷 하나만 반환하세요 (마크다운 백틱 제외):
+3. 반드시 아래의 순수 JSON 포맷 하나만 반환하세요 (마크다운 ```json 기호 없이 순수 JSON만 출력):
 {
   "dice_roll": 15,
   "thresholds": "대성공(1~3)/성공(4~25)/실패(26~46)/대실패(47~50)",
@@ -125,8 +116,8 @@ async def query_gemini_gm(player, action_text):
     default_res = {
         "dice_roll": random.randint(1, 50),
         "thresholds": "1~3(대성공)/4~25(성공)/26~46(실패)/47~50(대실패)",
-        "result_grade": "진행",
-        "narrative": f"{player['name']}(은)는 주변을 살피며 앞으로 나아갈 길을 모색합니다.",
+        "result_grade": "성공",
+        "narrative": f"{player['name']}(은)는 새로운 결의를 다지며 행동에 나섭니다.",
         "days_passed": 1,
         "stat_changes": {},
         "location": player['location'],
@@ -138,42 +129,46 @@ async def query_gemini_gm(player, action_text):
         "game_over_narrative": ""
     }
 
-    if not client:
+    if not GEMINI_API_KEY:
         return default_res
 
     prompt = (
         f"[플레이어 상태]\n"
         f"이름: {player['name']} ({player['identity']}, {player['age']}세)\n"
         f"현재 일자: 서기 {player['curr_year']}년 {player['curr_month']}월 {player['curr_day']}일\n"
-        f"능력치: 무력 {player['war']} / 지력 {player['intel']} / 통솔 {player['lead']} / 정치 {player['pol']} / 매력 {player['cha']}\n"
+        f"능력치: 통솔 {player['lead']} / 무력 {player['war']} / 지력 {player['intel']} / 정치 {player['pol']} / 매력 {player['cha']}\n"
         f"병력: {player['troops']}명, 금: {player['gold']}냥, 군량: {player['rations']}포, 무기: {player['weapons']}\n"
         f"위치: {player['location']}\n"
         f"최근 상황: {player['situation']}\n\n"
         f"[플레이어 행동]\n{action_text}"
     )
 
+    url = f"[https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=](https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=){GEMINI_API_KEY}"
+    payload = {
+        "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.7}
+    }
+
     try:
-        loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=SYSTEM_PROMPT,
-                    temperature=0.7,
-                )
-            )
-        )
-        raw = response.text.strip()
-        match = re.search(r"\{.*\}", raw, re.DOTALL)
-        if match:
-            return json.loads(match.group(0))
-        default_res["narrative"] = raw[:800]
-        return default_res
+        async with ClientSession() as session:
+            async with session.post(url, json=payload, timeout=20) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    raw = data['candidates'][0]['content']['parts'][0]['text'].strip()
+                    match = re.search(r"\{.*\}", raw, re.DOTALL)
+                    if match:
+                        return json.loads(match.group(0))
+                    default_res["narrative"] = raw[:800]
+                    return default_res
+                else:
+                    err_txt = await resp.text()
+                    print(f"[Gemini HTTP Error {resp.status}]: {err_txt}")
+                    default_res["narrative"] = f"행동을 수행했습니다. (API 상태 코드: {resp.status})"
+                    return default_res
     except Exception as e:
-        print(f"[Gemini Call Error]: {e}")
-        default_res["narrative"] = f"행동을 실행했습니다. ({e})"
+        print(f"[Gemini Exception]: {e}")
+        default_res["narrative"] = f"행동을 완수했습니다. (오류: {e})"
         return default_res
 
 # 4. 상태창 Embed
@@ -204,7 +199,7 @@ def build_status_embed(p):
     embed.set_footer(text="원하는 행동을 채팅창에 자유롭게 입력하세요.")
     return embed
 
-# 5. Discord 버튼 인터페이스
+# 5. Discord UI
 class GameActionView(View):
     def __init__(self, user_id):
         super().__init__(timeout=None)
@@ -306,7 +301,7 @@ async def apply_gm_result(channel, p, res):
         await channel.send(embed=status_embed, view=view)
     except Exception as err:
         print(f"[apply_gm_result Error]: {err}")
-        await channel.send(f"⚠️ 결과 처리 중 오류가 발생했습니다: {err}")
+        await channel.send(f"⚠️ 결과 처리 중 오류: {err}")
 
 # 7. 캐릭터 생성
 CREATION_STEPS = {
@@ -393,7 +388,7 @@ async def handle_creation(message, p, step):
         init_res = await query_gemini_gm(p, f"서기 {p['start_year']}년, {p['age']}세 {p['identity']} 신분으로 세상에 나서는 첫 인트로를 서술하라.")
         await apply_gm_result(message.channel, p, init_res)
 
-# 8. 메시지 핸들러
+# 8. 메시지 수신 핸들러
 @bot.event
 async def on_ready():
     print(f"✅ {bot.user} 봇이 성공적으로 로그인되었습니다!")
@@ -443,7 +438,7 @@ async def on_message(message):
         gm_res = await query_gemini_gm(player, content)
         await apply_gm_result(message.channel, player, gm_res)
 
-# 9. 봇 및 가짜 웹 포트 실행
+# 9. 포트 바인딩 및 봇 구동
 async def handle_ping(request):
     return web.Response(text="Bot is running!")
 
