@@ -464,9 +464,29 @@ async def on_message(message):
         gm_res = await query_gemini_gm(player, content)
         await apply_gm_result(message.channel, player, gm_res)
 
-# 9. 봇 실행 구동
-if __name__ == "__main__":
+# 9. 봇 및 웹 포트 바인딩 실행 (Render 무료 호스팅용)
+import asyncio
+from aiohttp import web
+
+async def handle_ping(request):
+    return web.Response(text="Bot is running!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get('/', handle_ping)
+    app.router.add_get('/healthz', handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+
+async def main():
+    await start_web_server()
     if DISCORD_TOKEN:
-        bot.run(DISCORD_TOKEN)
+        await bot.start(DISCORD_TOKEN)
     else:
         print("[에러] DISCORD_TOKEN 환경변수가 설정되지 않았습니다.")
+
+if __name__ == "__main__":
+    asyncio.run(main())
