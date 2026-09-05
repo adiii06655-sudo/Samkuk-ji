@@ -8,14 +8,19 @@ from aiohttp import web
 import discord
 from discord.ext import commands
 from discord.ui import View, Button
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 # 1. 환경 변수 및 설정
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
+client = None
 if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+    try:
+        client = genai.Client(api_key=GEMINI_API_KEY)
+    except Exception as e:
+        print(f"GenAI Client Init Error: {e}")
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -95,60 +100,71 @@ def save_player(p):
     conn.close()
 
 # 3. Gemini GM AI 엔진
-SYSTEM_PROMPT = (
-    "당신은 삼국지 정통 TRPG GM입니다.\n"
-    "규칙:\n"
-    "1. 행동 결과만 간결하고 객관적으로 서술합니다.\n"
-    "2. 1d50 판정: 1~3(대성공), 4~25(성공), 26~46(실패), 47~50(대실패).\n"
-    "3. 반드시 아래 JSON 형식 하나만 반환하세요:\n"
-    "{\n"
-    '  "dice_roll": 15,\n'
-    '  "thresholds": "대성공(1~3)/성공(4~25)/실패(26~46)/대실패(47~50)",\n'
-    '  "result_grade": "성공",\n'
-    '  "narrative": "스토리 서술 (최대 500자)",\n'
-    '  "days_passed": 3,\n'
-    '  "stat_changes": {"hp": 0, "troops": 0, "gold": 0, "rations": -1, "lead": 0, "war": 0, "intel": 0, "pol": 0, "cha": 0, "renown": 1, "notoriety": 0},\n'
-    '  "location": "현재 위치",\n'
-    '  "situation": "상황 요약 한 줄",\n'
-    '  "met_npc": null,\n'
-    '  "canon_event": "원전 사건 요약",\n'
-    '  "if_event": "대체역사 요약",\n'
-    '  "is_game_over": false,\n'
-    '  "game_over_narrative": ""\n'
-    "}"
-)
+SYSTEM_PROMPT = """당신은 삼국지 정통 TRPG GM입니다.
+규칙:
+1. 사견을 배제하고 플레이어의 행동에 따른 전개 결과를 200~400자 내외로 흥미진진하게 서술하세요.
+2. 1d50 주사위 판정: 1~3(대성공), 4~25(성공), 26~46(실패), 47~50(대실패).
+3. 반드시 아래의 순수 JSON 포맷 하나만 반환하세요 (마크다운 백틱 제외):
+{
+  "dice_roll": 15,
+  "thresholds": "대성공(1~3)/성공(4~25)/실패(26~46)/대실패(47~50)",
+  "result_grade": "성공",
+  "narrative": "스토리 서술",
+  "days_passed": 3,
+  "stat_changes": {"hp": 0, "troops": 0, "gold": 0, "rations": -1, "lead": 0, "war": 0, "intel": 0, "pol": 0, "cha": 0, "renown": 1, "notoriety": 0},
+  "location": "현재 위치",
+  "situation": "상황 요약 한 줄",
+  "met_npc": null,
+  "canon_event": "원전 고증 사건",
+  "if_event": "변형된 역사 IF 흐름",
+  "is_game_over": false,
+  "game_over_narrative": ""
+}"""
 
 async def query_gemini_gm(player, action_text):
     default_res = {
         "dice_roll": random.randint(1, 50),
-        "thresholds": "기본 판정",
-        "result_grade": "성공",
-        "narrative": f"{player['name']}(은)는 난세 속에서 행동을 시작합니다: {action_text}",
+        "thresholds": "1~3(대성공)/4~25(성공)/26~46(실패)/47~50(대실패)",
+        "result_grade": "진행",
+        "narrative": f"{player['name']}(은)는 주변을 살피며 앞으로 나아갈 길을 모색합니다.",
         "days_passed": 1,
         "stat_changes": {},
         "location": player['location'],
         "situation": player['situation'],
         "met_npc": None,
-        "canon_event": player.get('canon_history', '원전 흐름'),
+        "canon_event": player.get('canon_history', '원전 전개'),
         "if_event": player.get('if_history', '새로운 행보'),
         "is_game_over": False,
         "game_over_narrative": ""
     }
 
-    if not GEMINI_API_KEY:
+    if not client:
         return default_res
 
+    prompt = (
+        f"[플레이어 상태]\n"
+        f"이름: {player['name']} ({player['identity']}, {player['age']}세)\n"
+        f"현재 일자: 서기 {player['curr_year']}년 {player['curr_month']}월 {player['curr_day']}일\n"
+        f"능력치: 무력 {player['war']} / 지력 {player['intel']} / 통솔 {player['lead']} / 정치 {player['pol']} / 매력 {player['cha']}\n"
+        f"병력: {player['troops']}명, 금: {player['gold']}냥, 군량: {player['rations']}포, 무기: {player['weapons']}\n"
+        f"위치: {player['location']}\n"
+        f"최근 상황: {player['situation']}\n\n"
+        f"[플레이어 행동]\n{action_text}"
+    )
+
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash", system_instruction=SYSTEM_PROMPT)
-        prompt = (
-            f"[플레이어 상태]\n"
-            f"이름: {player['name']} ({player['identity']}, {player['age']}세)\n"
-            f"현재: 서기 {player['curr_year']}년 {player['curr_month']}월 {player['curr_day']}일\n"
-            f"무력 {player['war']} / 지력 {player['intel']} / 통솔 {player['lead']} / 정치 {player['pol']} / 매력 {player['cha']}\n"
-            f"위치: {player['location']}\n"
-            f"[행동/상황]\n{action_text}"
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_PROMPT,
+                    temperature=0.7,
+                )
+            )
         )
-        response = await model.generate_content_async(prompt)
         raw = response.text.strip()
         match = re.search(r"\{.*\}", raw, re.DOTALL)
         if match:
@@ -156,8 +172,8 @@ async def query_gemini_gm(player, action_text):
         default_res["narrative"] = raw[:800]
         return default_res
     except Exception as e:
-        print(f"[Gemini Error]: {e}")
-        default_res["narrative"] = f"난세의 기운이 감돕니다. ({action_text})"
+        print(f"[Gemini Call Error]: {e}")
+        default_res["narrative"] = f"행동을 실행했습니다. ({e})"
         return default_res
 
 # 4. 상태창 Embed
@@ -235,7 +251,7 @@ class GameActionView(View):
         embed.add_field(name="[변형된 역사 - IF]", value=p.get('if_history') or "원전 흐름 유지 중", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# 6. GM 판정 결과 반영
+# 6. GM 결과 반영
 async def apply_gm_result(channel, p, res):
     try:
         days = res.get("days_passed", 1)
@@ -327,7 +343,7 @@ async def handle_creation(message, p, step):
     elif step == 3:
         nums = [int(n) for n in re.findall(r'\d+', text)]
         if len(nums) < 5:
-            await message.channel.send("5개 능력치 수치를 순서대로 띄어쓰기로 입력하세요. (예: `80 85 75 60 70`)")
+            await message.channel.send("5개 능력치를 띄어쓰기로 입력하세요. (예: `80 85 75 60 70`)")
             return
         p['lead'], p['war'], p['intel'], p['pol'], p['cha'] = nums[:5]
         p['creation_step'] = 4
@@ -427,7 +443,7 @@ async def on_message(message):
         gm_res = await query_gemini_gm(player, content)
         await apply_gm_result(message.channel, player, gm_res)
 
-# 9. 봇 및 웹 포트 바인딩 실행
+# 9. 봇 및 가짜 웹 포트 실행
 async def handle_ping(request):
     return web.Response(text="Bot is running!")
 
