@@ -1,4 +1,3 @@
 discord.py
-google-genai
+google-generativeai
 aiohttp
-
