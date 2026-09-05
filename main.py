@@ -117,8 +117,11 @@ async def query_gemini_gm(player, action_text):
         return {
             "dice_roll": random.randint(1, 50),
             "result_grade": "오류",
-            "narrative": "GEMINI_API_KEY 환경변수가 누락되었습니다.",
-            "days_passed": 0, "stat_changes": {}, "location": player['location'], "situation": player['situation']
+            "narrative": "GEMINI_API_KEY 환경변수가 설정되지 않았습니다.",
+            "days_passed": 0,
+            "stat_changes": {},
+            "location": player['location'],
+            "situation": player['situation']
         }
 
     prompt = (
@@ -146,7 +149,7 @@ async def query_gemini_gm(player, action_text):
         ("v1beta", "gemini-3.6-flash"),
         ("v1", "gemini-3.6-flash"),
         ("v1beta", "gemini-2.5-flash"),
-        ("v1beta", "gemini-flash-latest")
+        ("v1beta", "gemini-1.5-flash-latest")
     ]
 
     last_error = ""
@@ -172,11 +175,8 @@ async def query_gemini_gm(player, action_text):
                             "situation": player['situation']
                         }
                     else:
-                        last_error = f"[{ver}/{model} HTTP {resp.status}]: {resp_text}"
+                        last_error = f"[{ver}/{model} HTTP {resp.status}]: " + resp_text
             except Exception as e:
-                last_error = f"[{ver}/{model} Exception]: {e}"
+                last_error = f"[{ver}/{model} Exception]: " + str(e)
 
-    return {
-        "dice_roll": random.randint(1, 50),
-        "result_grade": "API 에러",
-        "narrative": f"⚠️ Gemini 연결 실패:\n```{last_error[:600]}
+    err_msg = "⚠️ Gemini 연결 실패:\n```\n" + last_error[:600] + "\n
