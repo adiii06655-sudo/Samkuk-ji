@@ -92,15 +92,22 @@ def save_player(p):
 
 # 3. Gemini REST API 엔진
 SYSTEM_PROMPT = """당신은 삼국지 정통 TRPG GM입니다.
-반드시 아래 JSON 형식으로만 답하세요:
+규칙:
+1. 플레이어 행동에 따른 전개 결과를 200~400자 내외로 박진감 있게 서술하세요.
+2. 1d50 주사위 판정: 1~3(대성공), 4~25(성공), 26~46(실패), 47~50(대실패).
+3. 반드시 아래 순수 JSON 포맷 하나만 반환하세요:
 {
   "dice_roll": 15,
+  "thresholds": "대성공(1~3)/성공(4~25)/실패(26~46)/대실패(47~50)",
   "result_grade": "성공",
-  "narrative": "플레이어 행동에 대한 박진감 넘치는 서술 (200~400자)",
+  "narrative": "스토리 서술",
   "days_passed": 1,
-  "stat_changes": {"hp": 0, "troops": 0, "gold": 0, "rations": 0, "lead": 0, "war": 0, "intel": 0, "pol": 0, "cha": 0, "renown": 0, "notoriety": 0},
+  "stat_changes": {"hp": 0, "troops": 0, "gold": 0, "rations": -1, "lead": 0, "war": 0, "intel": 0, "pol": 0, "cha": 0, "renown": 1, "notoriety": 0},
   "location": "현재 위치",
-  "situation": "상황 한 줄 요약",
+  "situation": "상황 요약 한 줄",
+  "met_npc": null,
+  "canon_event": "원전 사건",
+  "if_event": "대체역사 전개",
   "is_game_over": false,
   "game_over_narrative": ""
 }"""
@@ -110,11 +117,8 @@ async def query_gemini_gm(player, action_text):
         return {
             "dice_roll": random.randint(1, 50),
             "result_grade": "오류",
-            "narrative": "❌ Render 환경 변수에 GEMINI_API_KEY가 등록되지 않았습니다.",
-            "days_passed": 0,
-            "stat_changes": {},
-            "location": player['location'],
-            "situation": player['situation']
+            "narrative": "GEMINI_API_KEY 환경변수가 누락되었습니다.",
+            "days_passed": 0, "stat_changes": {}, "location": player['location'], "situation": player['situation']
         }
 
     prompt = (
@@ -123,6 +127,7 @@ async def query_gemini_gm(player, action_text):
         f"이름: {player['name']} ({player['identity']}, {player['age']}세)\n"
         f"현재: 서기 {player['curr_year']}년 {player['curr_month']}월 {player['curr_day']}일\n"
         f"무력 {player['war']} / 지력 {player['intel']} / 통솔 {player['lead']} / 정치 {player['pol']} / 매력 {player['cha']}\n"
+        f"병력 {player['troops']}명 / 금 {player['gold']}냥 / 군량 {player['rations']}포대 / 무기 {player['weapons']}\n"
         f"위치: {player['location']}\n"
         f"[플레이어 행동]\n{action_text}"
     )
@@ -137,14 +142,21 @@ async def query_gemini_gm(player, action_text):
         ]
     }
 
-    models = ["gemini-1.5-flash", "gemini-1.5-pro"]
-    last_error = ""
+    # 지원되는 최신 엔드포인트 및 모델 리스트
+    endpoints = [
+        ("v1beta", "gemini-2.0-flash"),
+        ("v1beta", "gemini-2.5-flash"),
+        ("v1beta", "gemini-2.0-flash-exp"),
+        ("v1", "gemini-1.5-flash"),
+        ("v1", "gemini-2.0-flash")
+    ]
 
+    last_error = ""
     async with ClientSession() as session:
-        for model in models:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
+        for ver, model in endpoints:
+            url = f"https://generativelanguage.googleapis.com/{ver}/models/{model}:generateContent?key={GEMINI_API_KEY}"
             try:
-                async with session.post(url, json=payload, timeout=20) as resp:
+                async with session.post(url, json=payload, timeout=25) as resp:
                     resp_text = await resp.text()
                     if resp.status == 200:
                         data = json.loads(resp_text)
@@ -162,14 +174,14 @@ async def query_gemini_gm(player, action_text):
                             "situation": player['situation']
                         }
                     else:
-                        last_error = f"[{model} HTTP {resp.status}]: {resp_text}"
+                        last_error = f"[{ver}/{model} HTTP {resp.status}]: {resp_text}"
             except Exception as e:
-                last_error = f"[{model} Exception]: {e}"
+                last_error = f"[{ver}/{model} Exception]: {e}"
 
     return {
         "dice_roll": random.randint(1, 50),
         "result_grade": "API 에러",
-        "narrative": f"⚠️ Gemini 연결 실패 원인:\n```{last_error[:700]}```",
+        "narrative": f"⚠️ Gemini 연결 실패:\n```{last_error[:600]}```",
         "days_passed": 0,
         "stat_changes": {},
         "location": player['location'],
@@ -196,6 +208,10 @@ def build_status_embed(p):
 
     assets_line = f"👥 병력: **{p['troops']}명** | 💰 소지금: **{p['gold']}냥** | 🌾 군량: **{p['rations']}포대**\n🗡️ 무기: {p['weapons']}"
     embed.add_field(name="📦 군세 및 물자", value=assets_line, inline=False)
+
+    rel_dict = json.loads(p['relationships']) if p['relationships'] else {}
+    rel_str = "\n".join([f"• **{k}**: 신뢰 {v.get('trust',0)} / 호감 {v.get('favor',0)}" for k, v in list(rel_dict.items())[:3]]) or "교류 인물 없음"
+    embed.add_field(name="🤝 인물 관계", value=rel_str, inline=False)
     embed.add_field(name="📌 현재 상황", value=f"{p['situation']}", inline=False)
     embed.set_footer(text="원하는 행동을 채팅창에 자유롭게 입력하세요.")
     return embed
@@ -210,6 +226,13 @@ class GameActionView(View):
     async def btn_status(self, interaction: discord.Interaction, button: Button):
         p = get_player(self.user_id)
         await interaction.response.send_message(embed=build_status_embed(p), ephemeral=True)
+
+    @discord.ui.button(label="시간 보내기", style=discord.ButtonStyle.secondary, emoji="⏳")
+    async def btn_wait(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.defer()
+        p = get_player(self.user_id)
+        res = await query_gemini_gm(p, "한 달 동안 정세를 관망하며 휴식한다.")
+        await apply_gm_result(interaction.channel, p, res)
 
 # 6. GM 결과 반영
 async def apply_gm_result(channel, p, res):
@@ -227,13 +250,26 @@ async def apply_gm_result(channel, p, res):
     for k, v in changes.items():
         if k in p and isinstance(v, (int, float)):
             p[k] = max(0, p[k] + int(v))
+    if 'max_hp' in p:
+        p['hp'] = min(p['hp'], p['max_hp'])
 
     if res.get("location"):
         p['location'] = res["location"]
     if res.get("situation"):
         p['situation'] = res["situation"]
+    if res.get("canon_event"):
+        p['canon_history'] = res["canon_event"]
+    if res.get("if_event"):
+        p['if_history'] = res["if_event"]
 
     save_player(p)
+
+    if p['hp'] <= 0 or res.get("is_game_over"):
+        p['is_dead'] = 1
+        save_player(p)
+        desc = res.get("game_over_narrative") or res.get("narrative") or "장수가 사망했습니다."
+        await channel.send(embed=discord.Embed(title="💀 [GAME OVER]", description=desc[:1800], color=0x000000))
+        return
 
     dice_val = res.get('dice_roll', random.randint(1, 50))
     grade = res.get('result_grade', '진행')
@@ -251,11 +287,11 @@ async def apply_gm_result(channel, p, res):
 
 # 7. 캐릭터 생성
 CREATION_STEPS = {
-    0: "① 장수의 **이름**을 입력해 주세요.",
-    1: "② 게임을 시작할 **시작 연도**를 입력해 주세요. (예: 184)",
+    0: "① 장수의 **이름**을 입력해 주세요. (예: 조자룡, 유봉)",
+    1: "② 시작 **연도**를 입력해 주세요. (예: 184, 190)",
     2: "③ 장수의 **나이**를 입력해 주세요. (예: 20)",
-    3: "④ 장수의 **5대 능력치**를 공백으로 구분해 입력해 주세요. (예: `80 85 70 60 75`)",
-    4: "⑤ 장수의 **시작 신분**을 입력해 주세요. (예: 일반 백성, 재야 무사)"
+    3: "④ 장수의 **5대 능력치**를 공백으로 구분해 입력해 주세요.\n*(통솔 무력 지력 정치 매력 - 예: `80 85 70 60 75`)*",
+    4: "⑤ 장수의 **시작 신분**을 입력해 주세요. (예: 일반 백성, 재야 무사, 호족)"
 }
 
 async def handle_creation(message, p, step):
@@ -281,12 +317,12 @@ async def handle_creation(message, p, step):
     elif step == 3:
         nums = [int(n) for n in re.findall(r'\d+', text)]
         if len(nums) < 5:
-            await message.channel.send("5개 수치를 띄어쓰기로 입력하세요.")
+            await message.channel.send("5개 수치를 띄어쓰기로 입력하세요. (예: `80 85 75 60 70`)")
             return
         p['lead'], p['war'], p['intel'], p['pol'], p['cha'] = nums[:5]
         p['creation_step'] = 4
         save_player(p)
-        await message.channel.send(f"능력치 설정 완료!\n\n{CREATION_STEPS[4]}")
+        await message.channel.send(f"능력치 입력 완료!\n\n{CREATION_STEPS[4]}")
     elif step == 4:
         p['identity'] = text
         p['creation_step'] = 5
@@ -302,14 +338,14 @@ async def handle_creation(message, p, step):
         p['relationships'] = "{}"
         p['situation'] = f"서기 {p['start_year']}년 난세에 첫발을 디딤."
         save_player(p)
-        await message.channel.send("장수 등록 완료! 모험을 시작합니다...")
-        init_res = await query_gemini_gm(p, "세상에 첫발을 내딛는 오프닝 서술을 시작하라.")
+        await message.channel.send("장수 등록 완료! 삼국지의 세계로 진입합니다...")
+        init_res = await query_gemini_gm(p, "세상에 첫발을 내딛는 오프닝 인트로를 서술하라.")
         await apply_gm_result(message.channel, p, init_res)
 
 # 8. 메시지 핸들러
 @bot.event
 async def on_ready():
-    print(f"✅ {bot.user} 온라인!")
+    print(f"✅ {bot.user} 온라인 및 준비 완료!")
 
 @bot.event
 async def on_message(message):
