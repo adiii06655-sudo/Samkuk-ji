@@ -90,12 +90,12 @@ def save_player(p):
     conn.commit()
     conn.close()
 
-# 3. Gemini REST API 직접 호출 엔진 (외부 SDK 무의존)
+# 3. Gemini REST API 직접 호출 엔진
 SYSTEM_PROMPT = """당신은 삼국지 정통 TRPG GM입니다.
 규칙:
 1. 사견을 배제하고 플레이어의 행동에 따른 역사적/상황적 전개 결과를 200~400자 내외로 박진감 있게 서술하세요.
 2. 1d50 주사위 판정: 1~3(대성공), 4~25(성공), 26~46(실패), 47~50(대실패).
-3. 반드시 아래의 순수 JSON 포맷 하나만 반환하세요 (마크다운 ```json 기호 없이 순수 JSON만 출력):
+3. 반드시 아래의 순수 JSON 포맷 하나만 반환하세요 (마크다운 백틱 기호 없이 순수 JSON만 출력):
 {
   "dice_roll": 15,
   "thresholds": "대성공(1~3)/성공(4~25)/실패(26~46)/대실패(47~50)",
@@ -116,7 +116,7 @@ async def query_gemini_gm(player, action_text):
     default_res = {
         "dice_roll": random.randint(1, 50),
         "thresholds": "1~3(대성공)/4~25(성공)/26~46(실패)/47~50(대실패)",
-        "result_grade": "성공",
+        "result_grade": "진행",
         "narrative": f"{player['name']}(은)는 새로운 결의를 다지며 행동에 나섭니다.",
         "days_passed": 1,
         "stat_changes": {},
@@ -143,7 +143,7 @@ async def query_gemini_gm(player, action_text):
         f"[플레이어 행동]\n{action_text}"
     )
 
-    url = f"[https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=](https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=){GEMINI_API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     payload = {
         "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
         "contents": [{"parts": [{"text": prompt}]}],
@@ -164,7 +164,7 @@ async def query_gemini_gm(player, action_text):
                 else:
                     err_txt = await resp.text()
                     print(f"[Gemini HTTP Error {resp.status}]: {err_txt}")
-                    default_res["narrative"] = f"행동을 수행했습니다. (API 상태 코드: {resp.status})"
+                    default_res["narrative"] = f"행동을 수행했습니다. (API 코드: {resp.status})"
                     return default_res
     except Exception as e:
         print(f"[Gemini Exception]: {e}")
