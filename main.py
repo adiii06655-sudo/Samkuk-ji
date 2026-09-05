@@ -90,7 +90,7 @@ def save_player(p):
     conn.commit()
     conn.close()
 
-# 3. Gemini REST API 엔진
+# 3. Gemini REST API 엔진 (gemini-3.6-flash 단독 고정)
 SYSTEM_PROMPT = """당신은 삼국지 정통 TRPG GM입니다.
 규칙:
 1. 플레이어 행동에 따른 전개 결과를 200~400자 내외로 박진감 있게 서술하세요.
@@ -145,17 +145,11 @@ async def query_gemini_gm(player, action_text):
         ]
     }
 
-    # 구글 에러 메시지에서 직접 권장한 최신 정식 모델을 1순위로 지정
-    endpoints = [
-        ("v1beta", "gemini-3.6-flash"),
-        ("v1", "gemini-3.6-flash"),
-        ("v1beta", "gemini-2.5-flash")
-    ]
-
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={GEMINI_API_KEY}"
     last_error = ""
+
     async with ClientSession() as session:
-        for ver, model in endpoints:
-            url = f"https://generativelanguage.googleapis.com/{ver}/models/{model}:generateContent?key={GEMINI_API_KEY}"
+        for attempt in range(3):
             try:
                 async with session.post(url, json=payload, timeout=25) as resp:
                     resp_text = await resp.text()
@@ -175,9 +169,11 @@ async def query_gemini_gm(player, action_text):
                             "situation": player['situation']
                         }
                     else:
-                        last_error = f"HTTP {resp.status} ({model}): {resp_text[:200]}"
+                        last_error = f"HTTP {resp.status}: {resp_text[:200]}"
+                        await asyncio.sleep(1)
             except Exception as e:
-                last_error = f"Exception ({model}): {e}"
+                last_error = f"Exception: {e}"
+                await asyncio.sleep(1)
 
     return {
         "dice_roll": random.randint(1, 50),
